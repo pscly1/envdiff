@@ -1,0 +1,17 @@
+{
+  "name": "envdiff-cli",
+  "version": "0.4.1",
+  "description": "Compare .env files key by key: catch missing keys and value drift before they break a deploy.",
+  "bin": { "envdiff": "bin/envdiff" },
+  "main": "bin/envdiff",
+  "type": "commonjs",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test test/",
+    "lint": "node --check bin/envdiff"
+  },
+  "keywords": ["dotenv", "env", "config", "diff", "cli", "deployment", "devops"],
+  "author": "pscly1",
+  "license": "MIT",
+  "files": ["bin/", "README.md", "LICENSE"]
+}

@@ -1,0 +1,213 @@
+#!/usr/bin/env node
+/**
+ * envdiff — compare .env files by key and flag the drift that breaks deploys.
+ * No dependencies. Node 18+.
+ */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const VERSION = require('../package.json').version;
+
+const C = process.stdout.isTTY && process.env.NO_COLOR !== '1' ? {
+  red: s => `\u001b[31m${s}\u001b[0m`,
+  green: s => `\u001b[32m${s}\u001b[0m`,
+  yellow: s => `\u001b[33m${s}\u001b[0m`,
+  dim: s => `\u001b[2m${s}\u001b[0m`,
+  bold: s => `\u001b[1m${s}\u001b[0m`,
+} : {
+  red: s => s, green: s => s, yellow: s => s, dim: s => s, bold: s => s,
+};
+
+/**
+ * Parse a dotenv file into { key: value }.
+ * Handles: export prefixes, quotes, inline comments, blank lines, CRLF.
+ */
+function parseDotenv(text) {
+  const out = {};
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const withoutExport = line.startsWith('export ') ? line.slice(7).trim() : line;
+    const eq = withoutExport.indexOf('=');
+    if (eq === -1) continue;
+    const key = withoutExport.slice(0, eq).trim();
+    if (!key) continue;
+    let value = withoutExport.slice(eq + 1).trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.endsWith(quote) && value.length > 1) {
+      value = value.slice(1, -1);
+      if (quote === '"') {
+        value = value.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      }
+    } else {
+      const hash = value.indexOf(' #');
+      if (hash !== -1) value = value.slice(0, hash).trim();
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** Compare two key maps. Returns only the differences, in a stable order. */
+function diffEnv(left, right, leftName = 'left', rightName = 'right') {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  const onlyLeft = leftKeys.filter(k => !(k in right));
+  const onlyRight = rightKeys.filter(k => !(k in left));
+  const changed = leftKeys.filter(k => k in right && left[k] !== right[k]);
+  const same = leftKeys.filter(k => k in right && left[k] === right[k]);
+  return { leftName, rightName, left, right, onlyLeft, onlyRight, changed, same };
+}
+
+/** Heuristic: does this key look like a secret? Used only to mask output. */
+function looksSecret(key) {
+  return /(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE|CREDENTIAL|_KEY$|^KEY$)/i.test(key);
+}
+
+function maskValue(key, value, reveal) {
+  if (reveal || !looksSecret(key)) return value;
+  if (value === '') return '';
+  if (value.length <= 8) return '*'.repeat(value.length);
+  return value.slice(0, 3) + '*'.repeat(Math.min(value.length - 6, 20)) + value.slice(-3);
+}
+
+function formatReport(d, opts = {}) {
+  const lines = [];
+  const reveal = !!opts.reveal;
+  lines.push(C.bold(`envdiff: ${d.leftName} vs ${d.rightName}`));
+  lines.push('');
+
+  if (d.onlyLeft.length) {
+    lines.push(C.red(`  missing in ${d.rightName} (${d.onlyLeft.length}):`));
+    for (const k of d.onlyLeft) lines.push(`    - ${k}`);
+  }
+  if (d.onlyRight.length) {
+    lines.push(C.yellow(`  only in ${d.rightName} (${d.onlyRight.length}):`));
+    for (const k of d.onlyRight) lines.push(`    + ${k}`);
+  }
+  if (d.changed.length) {
+    lines.push(C.yellow(`  different values (${d.changed.length}):`));
+    for (const k of d.changed) {
+      const a = maskValue(k, d.left[k], reveal);
+      const b = maskValue(k, d.right[k], reveal);
+      lines.push(`    ~ ${k}: ${JSON.stringify(a)} -> ${JSON.stringify(b)}`);
+    }
+  }
+  if (!d.onlyLeft.length && !d.onlyRight.length && !d.changed.length) {
+    lines.push(C.green('  in sync — same keys, same values'));
+  }
+  lines.push('');
+  lines.push(C.dim(`  ${d.same.length} identical, ${d.changed.length} changed, ` +
+    `${d.onlyLeft.length} missing, ${d.onlyRight.length} extra`));
+  return lines.join('\n');
+}
+
+/** Exit code contract: 0 in sync, 1 drift found, 2 usage/IO error. */
+function exitCodeFor(d) {
+  const drift = d.onlyLeft.length + d.onlyRight.length + d.changed.length;
+  return drift === 0 ? 0 : 1;
+}
+
+function readEnvFile(file) {
+  return parseDotenv(fs.readFileSync(file, 'utf8'));
+}
+
+function usage() {
+  return [
+    'Usage: envdiff <fileA> <fileB> [options]',
+    '',
+    'Compare two .env files key by key and report drift.',
+    '',
+    'Options:',
+    '  --reveal          show real values instead of masking secrets',
+    '  --json            machine-readable output',
+    '  --only-missing    exit 1 only for keys missing on one side (ignore value drift)',
+    '  --keys <a,b>      restrict the comparison to these keys',
+    '  --check           alias for the default drift-check mode',
+    '  --version         print version',
+    '  -h, --help        this message',
+    '',
+    'Exit codes: 0 in sync, 1 drift, 2 usage or IO error',
+  ].join('\n');
+}
+
+function main(argv) {
+  const args = argv.slice(2);
+  if (args.includes('--version')) { console.log(VERSION); return 0; }
+  if (!args.length || args.includes('-h') || args.includes('--help')) {
+    console.log(usage());
+    return args.length ? 0 : 2;
+  }
+
+  const files = [];
+  const opts = { reveal: false, json: false, onlyMissing: false, keys: null };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--reveal') opts.reveal = true;
+    else if (a === '--json') opts.json = true;
+    else if (a === '--only-missing') opts.onlyMissing = true;
+    else if (a === '--check') { /* default behaviour */ }
+    else if (a === '--keys') {
+      const v = args[++i];
+      if (!v) { console.error('envdiff: --keys needs a value'); return 2; }
+      opts.keys = v.split(',').map(s => s.trim()).filter(Boolean);
+    } else if (a.startsWith('-')) {
+      console.error(`envdiff: unknown option ${a}`);
+      return 2;
+    } else files.push(a);
+  }
+
+  if (files.length !== 2) {
+    console.error('envdiff: need exactly two files\n');
+    console.error(usage());
+    return 2;
+  }
+
+  let left, right;
+  try {
+    left = readEnvFile(files[0]);
+    right = readEnvFile(files[1]);
+  } catch (err) {
+    console.error(`envdiff: ${err.message}`);
+    return 2;
+  }
+
+  if (opts.keys) {
+    const pick = src => Object.fromEntries(opts.keys.filter(k => k in src).map(k => [k, src[k]]));
+    left = pick(left);
+    right = pick(right);
+  }
+
+  const d = diffEnv(left, right, path.basename(files[0]), path.basename(files[1]));
+
+  if (opts.json) {
+    const payload = {
+      left: d.leftName,
+      right: d.rightName,
+      onlyLeft: d.onlyLeft,
+      onlyRight: d.onlyRight,
+      changed: d.changed.map(k => ({
+        key: k,
+        left: maskValue(k, d.left[k], opts.reveal),
+        right: maskValue(k, d.right[k], opts.reveal),
+      })),
+      same: d.same.length,
+    };
+    process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+  } else {
+    console.log(formatReport(d, opts));
+  }
+
+  if (opts.onlyMissing) {
+    return d.onlyLeft.length + d.onlyRight.length === 0 ? 0 : 1;
+  }
+  return exitCodeFor(d);
+}
+
+module.exports = { parseDotenv, diffEnv, formatReport, looksSecret, maskValue, exitCodeFor, main };
+
+if (require.main === module) {
+  process.exitCode = main(process.argv);
+}
