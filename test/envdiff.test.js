@@ -128,6 +128,33 @@ test('CLI --keys narrows the comparison', () => {
   assert.deepStrictEqual(parsed.onlyLeft, []);
 });
 
+test('CLI --format github emits workflow annotations', () => {
+  const a = tmpFile('a.env', 'A=1\nB=2\n');
+  const b = tmpFile('b.env', 'A=1\n');
+  let out = '';
+  let code = 0;
+  try {
+    out = execFileSync(process.execPath, [BIN, a, b, '--format', 'github'], { encoding: 'utf8' });
+  } catch (err) {
+    out = err.stdout;
+    code = err.status;
+  }
+  assert.match(out, /::error file=b\.env::missing key B/);
+  assert.strictEqual(code, 1);
+});
+
+test('CLI --format rejects unknown values', () => {
+  const a = tmpFile('a.env', 'A=1\n');
+  const b = tmpFile('b.env', 'A=1\n');
+  let code = 0;
+  try {
+    execFileSync(process.execPath, [BIN, a, b, '--format', 'yaml'], { stdio: 'pipe' });
+  } catch (err) {
+    code = err.status;
+  }
+  assert.strictEqual(code, 2);
+});
+
 test('CLI exits 2 on a missing file', () => {
   const a = tmpFile('a.env', 'A=1\n');
   let code = 0;

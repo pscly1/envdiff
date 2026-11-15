@@ -36,7 +36,8 @@ git clone https://github.com/pscly1/envdiff && cd envdiff && npm link
 envdiff <fileA> <fileB> [options]
 
   --reveal          show real values instead of masking secrets
-  --json            machine-readable output
+  --json            machine-readable output (same as --format json)
+  --format <fmt>    text (default), json, or github action annotations
   --only-missing    exit 1 only for keys missing on one side (ignore value drift)
   --keys <a,b>      restrict the comparison to these keys
   --version         print version
@@ -60,6 +61,15 @@ That makes it drop straight into CI:
 
 `--only-missing` is what you usually want in CI: staging is *supposed* to have different values,
 but it must not have different *keys*.
+
+### GitHub Actions annotations
+
+`--format github` prints `::error` / `::warning` workflow commands, so a missing key shows up
+inline on the PR diff instead of hiding in a log:
+
+```yaml
+- run: npx envdiff-cli .env.example .env.production --format github
+```
 
 ### As a library
 
@@ -99,7 +109,7 @@ Masking is a safety default, **not** a security boundary: `--json` and `--reveal
 npm test
 ```
 
-Sixteen cases over the parser, the differ, masking, and the CLI's exit codes — each one spawns the
+Eighteen cases over the parser, the differ, masking, and the CLI's exit codes — each one spawns the
 actual binary, so the exit-code contract is tested for real rather than mocked.
 
 ## License

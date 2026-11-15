@@ -122,7 +122,8 @@ function usage() {
     '',
     'Options:',
     '  --reveal          show real values instead of masking secrets',
-    '  --json            machine-readable output',
+    '  --json            machine-readable output (same as --format json)',
+    '  --format <fmt>    text (default), json, or github action annotations',
     '  --only-missing    exit 1 only for keys missing on one side (ignore value drift)',
     '  --keys <a,b>      restrict the comparison to these keys',
     '  --check           alias for the default drift-check mode',
@@ -142,11 +143,19 @@ function main(argv) {
   }
 
   const files = [];
-  const opts = { reveal: false, json: false, onlyMissing: false, keys: null };
+  const opts = { reveal: false, json: false, onlyMissing: false, keys: null, format: 'text' };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--reveal') opts.reveal = true;
     else if (a === '--json') opts.json = true;
+    else if (a === '--format') {
+      const v = args[++i];
+      if (v !== 'text' && v !== 'json' && v !== 'github') {
+        console.error('envdiff: --format must be text, json, or github');
+        return 2;
+      }
+      opts.format = v;
+    }
     else if (a === '--only-missing') opts.onlyMissing = true;
     else if (a === '--check') { /* default behaviour */ }
     else if (a === '--keys') {
@@ -182,7 +191,20 @@ function main(argv) {
 
   const d = diffEnv(left, right, path.basename(files[0]), path.basename(files[1]));
 
-  if (opts.json) {
+  if (opts.format === 'github') {
+    for (const k of d.onlyLeft) {
+      console.log(`::error file=${d.rightName}::missing key ${k}`);
+    }
+    for (const k of d.onlyRight) {
+      console.log(`::warning file=${d.leftName}::key ${k} is not in the reference file`);
+    }
+    for (const k of d.changed) {
+      console.log(`::warning file=${d.rightName}::value changed for ${k}`);
+    }
+    return exitCodeFor(d);
+  }
+
+  if (opts.json || opts.format === 'json') {
     const payload = {
       left: d.leftName,
       right: d.rightName,
